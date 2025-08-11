@@ -1,16 +1,16 @@
-
-from src.agent import QLearningAgent
+from src.agent import QLearningAgent, MonteCarloAgent  # Asegúrate de tener MonteCarloAgent en agent.py
 from src.env import CheckersEnv
 
 
 class Game:
-    def __init__(self):
+    def __init__(self, agent_cls=MonteCarloAgent):  # Monte Carlo por defecto
         self.env = CheckersEnv()
-        self.agent = QLearningAgent()
+        self.agent = agent_cls()
         self.state = self.env.reset()
         self.selected_piece = None
         self.game_mode = "human_vs_agent"
 
+    # -------- métodos utilitarios que requiere UI --------
     def reset(self):
         self.state = self.env.reset()
         self.selected_piece = None
@@ -31,7 +31,6 @@ class Game:
     def result_text(self):
         if not self.is_done():
             return f"Turno del {'Humano' if self.env.current_player == -1 else 'Agente'}"
-
         winner = self.get_winner()
         if winner == -1:
             return "¡Humano Gana!"
@@ -43,11 +42,13 @@ class Game:
     def get_valid_actions(self):
         return self.env.get_valid_actions()
 
+    # -------- juego --------
     def make_move(self, action):
         self.state, reward, done = self.env.step(action)
         return reward, done
 
     def handle_click(self, row, col):
+        # turno del humano
         if self.is_done() or self.env.current_player != -1:
             return False
 
@@ -61,17 +62,29 @@ class Game:
             from_row, from_col = self.selected_piece
             valid_actions = self.get_valid_actions()
             simple_move = (from_row, from_col, row, col)
+
+            # Movimiento simple
             if simple_move in valid_actions:
-                self.make_move(simple_move)
+                reward, done = self.make_move(simple_move)
+                # MC: registrar recompensa también cuando mueve el humano (si el agente la implementa)
+                if hasattr(self.agent, "record_reward"):
+                    self.agent.record_reward(reward)
                 self.selected_piece = None
+                if done and hasattr(self.agent, "end_episode"):
+                    self.agent.end_episode()
                 return True
 
+            # Captura (si tu entorno usa tuplas de 6)
             for action in valid_actions:
                 if (len(action) == 6 and
                     action[0] == from_row and action[1] == from_col and
                     action[2] == row and action[3] == col):
-                    self.make_move(action)
+                    reward, done = self.make_move(action)
+                    if hasattr(self.agent, "record_reward"):
+                        self.agent.record_reward(reward)
                     self.selected_piece = None
+                    if done and hasattr(self.agent, "end_episode"):
+                        self.agent.end_episode()
                     return True
 
             if board[row, col] == -1:
@@ -83,10 +96,25 @@ class Game:
         return False
 
     def agent_move(self):
+        # turno del agente
         if self.is_done() or self.env.current_player != 1:
             return
 
         valid_actions = self.get_valid_actions()
-        if valid_actions:
-            action = self.agent.choose_action(self.state, valid_actions)
-            self.make_move(action)
+        if not valid_actions:
+            return
+
+        # Elegir acción
+        action = self.agent.choose_action(self.state, valid_actions)
+
+        # MC: recordar (s,a) ANTES del step si el agente lo soporta
+        if hasattr(self.agent, "remember_action"):
+            self.agent.remember_action(self.state, action)
+
+        # Ejecutar y registrar recompensa
+        reward, done = self.make_move(action)
+        if hasattr(self.agent, "record_reward"):
+            self.agent.record_reward(reward)
+
+        if done and hasattr(self.agent, "end_episode"):
+            self.agent.end_episode()

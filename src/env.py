@@ -1,120 +1,185 @@
 import numpy as np
-import random
 
 class CheckersEnv:
     """
-    Entorno de damas inglesas en tablero 8x8 con 12 piezas por jugador.
-    - Jugador 1 (humano): -1
-    - Jugador -1 (agente): 1
-    - Casillas vacías: 0
+    Damas inglesas 8x8.
+    Piezas:
+      - Agente:  1 (hombre),  2 (reina)
+      - Humano: -1 (hombre), -2 (reina)
+      - Vacío:   0
+    Reglas:
+      - Captura obligatoria.
+      - Multi-captura: si tras capturar hay otra captura posible con la misma pieza,
+        el mismo jugador debe continuar (no se alterna el turno).
     """
-    def __init__(self):
+    def __init__(self, no_capture_draw=80):
         self.board_size = 8
+        self.no_capture_draw = no_capture_draw
         self.reset()
 
     def reset(self):
-        """Reinicia el tablero al estado inicial"""
         self.board = np.zeros((8, 8), dtype=int)
 
+        # Filas 0..2: humano (-1), 5..7: agente (1)
         for row in range(3):
             for col in range(8):
                 if (row + col) % 2 != 0:
-                    self.board[row, col] = -1  # Humano
-
+                    self.board[row, col] = -1
         for row in range(5, 8):
             for col in range(8):
                 if (row + col) % 2 != 0:
-                    self.board[row, col] = 1  # Agente
+                    self.board[row, col] = 1
 
-        self.current_player = -1
+        self.current_player = -1   # humano comienza
         self.done = False
         self.winner = None
+        self.must_continue_from = None   # (r,c) si debe seguir multi-captura
+        self.no_capture_moves = 0
         return self.get_state()
 
     def get_state(self):
-        return str(self.board.flatten().tolist())
+        # Incluir current_player para diferenciar el turno
+        return f"{self.current_player}|{self.board.flatten().tolist()}"
 
     def get_board_state(self):
         return self.board.copy()
 
-    def is_done(self):
-        return self.done
+    def is_done(self): return self.done
+    def get_winner(self): return self.winner
 
-    def get_winner(self):
-        return self.winner
-
+    # ----------------- Generación de movimientos -----------------
     def get_valid_actions(self, player=None):
         if player is None:
             player = self.current_player
 
         actions = []
-        pieces = np.where(self.board == player)
+        if self.must_continue_from is not None:
+            r, c = self.must_continue_from
+            if self.board[r, c] * player <= 0:  # pieza ya no pertenece al jugador
+                self.must_continue_from = None
+            else:
+                caps = self._get_piece_captures(r, c, player)
+                return caps  # solo puede seguir capturando con esa pieza
 
-        for i in range(len(pieces[0])):
-            row, col = pieces[0][i], pieces[1][i]
-            moves = self._get_piece_moves(row, col, player)
-            actions.extend(moves)
+        # Si no hay multi-captura pendiente, buscar movimientos/capturas de  el tablero
+        piece_positions = zip(*np.where(self.board * player > 0))
+        captures = []
+        moves = []
+        for r, c in piece_positions:
+            captures.extend(self._get_piece_captures(r, c, player))
+            if not captures:  # solo computar moves si aún no hay capturas globales
+                moves.extend(self._get_piece_moves(r, c, player))
 
-        return actions
+        # Captura obligatoria
+        return captures if captures else moves
+
+    def _directions_for(self, piece):
+        is_king = abs(piece) == 2
+        sign = 1 if piece > 0 else -1
+        if is_king:
+            return [(-1,-1), (-1,1), (1,-1), (1,1)]
+        # hombres: humano(-1) baja (+1 en fila); agente(+1) sube (-1 en fila)
+        return ([(1,-1), (1,1)] if sign < 0 else [(-1,-1), (-1,1)])
 
     def _get_piece_moves(self, row, col, player):
+        piece = self.board[row, col]
+        if piece * player <= 0:  # no es tu pieza
+            return []
         moves = []
-        directions = [(1, -1), (1, 1)] if player == 1 else [(-1, -1), (-1, 1)]
-        directions += [(-1, -1), (-1, 1), (1, -1), (1, 1)]  # Opcional: permitir reinas
-
-        for dr, dc in directions:
-            new_row, new_col = row + dr, col + dc
-            if 0 <= new_row < 8 and 0 <= new_col < 8:
-                if self.board[new_row, new_col] == 0:
-                    moves.append((row, col, new_row, new_col))
-                elif self.board[new_row, new_col] == -player:
-                    jump_row, jump_col = new_row + dr, new_col + dc
-                    if 0 <= jump_row < 8 and 0 <= jump_col < 8 and self.board[jump_row, jump_col] == 0:
-                        moves.append((row, col, jump_row, jump_col, new_row, new_col))
-
+        for dr, dc in self._directions_for(piece):
+            nr, nc = row + dr, col + dc
+            if 0 <= nr < 8 and 0 <= nc < 8 and self.board[nr, nc] == 0:
+                moves.append((row, col, nr, nc))
         return moves
 
+    def _get_piece_captures(self, row, col, player):
+        piece = self.board[row, col]
+        if piece * player <= 0:
+            return []
+        caps = []
+        for dr, dc in self._directions_for(piece):
+            mr, mc = row + dr, col + dc
+            jr, jc = row + 2*dr, col + 2*dc
+            if 0 <= jr < 8 and 0 <= jc < 8 and 0 <= mr < 8 and 0 <= mc < 8:
+                if self.board[mr, mc] * player < 0 and self.board[jr, jc] == 0:
+                    caps.append((row, col, jr, jc, mr, mc))
+        return caps
+
+    # ----------------- Dinámica del entorno -----------------
     def step(self, action):
         if self.done:
-            return self.get_state(), 0, True
+            return self.get_state(), 0.0, True
 
-        reward = 0
+        reward = 0.0
+        player = self.current_player
 
         if len(action) == 4:
-            from_row, from_col, to_row, to_col = action
-            self.board[to_row, to_col] = self.board[from_row, from_col]
-            self.board[from_row, from_col] = 0
-            reward = 0.1
+            fr, fc, tr, tc = action
+            capture = False
+        else:
+            fr, fc, tr, tc, cr, cc = action
+            capture = True
 
-        elif len(action) == 6:
-            from_row, from_col, to_row, to_col, cap_row, cap_col = action
-            self.board[to_row, to_col] = self.board[from_row, from_col]
-            self.board[from_row, from_col] = 0
-            self.board[cap_row, cap_col] = 0
-            reward = 10 if self.current_player == 1 else -10
+        # Validaciones mínimas (asumimos que la UI/agent pasa acciones válidas)
+        piece = self.board[fr, fc]
+        assert piece * player > 0, "La pieza no pertenece al jugador actual"
 
-        # Verificar coronación (reina opcional)
-        if self.board[to_row, to_col] == 1 and to_row == 0:
-            pass  # self.board[to_row, to_col] = 2  # Reina del agente (opcional)
-        elif self.board[to_row, to_col] == -1 and to_row == 7:
-            pass  # self.board[to_row, to_col] = -2  # Reina del humano (opcional)
+        # Ejecutar movimiento
+        if capture:
+            self.board[tr, tc] = piece
+            self.board[fr, fc] = 0
+            self.board[cr, cc] = 0
+            # Recompensa centrada en el agente (jugador +1)
+            reward += (1.0 if player == 1 else -1.0)
+            self.no_capture_moves = 0
+        else:
+            self.board[tr, tc] = piece
+            self.board[fr, fc] = 0
+            # Movimiento simple: sin recompensa densa (0) para no sesgar cuando mueve el humano
+            self.no_capture_moves += 1
 
-        # Verificar fin del juego
-        human_pieces = np.sum(self.board == -1)
-        agent_pieces = np.sum(self.board == 1)
+        # Coronación
+        promoted = False
+        if self.board[tr, tc] == 1 and tr == 0:
+            self.board[tr, tc] = 2
+            promoted = True
+        elif self.board[tr, tc] == -1 and tr == 7:
+            self.board[tr, tc] = -2
+            promoted = True
+        if promoted:
+            reward += (0.5 if player == 1 else -0.5)
+
+        # ¿Sigue la multi-captura?
+        self.must_continue_from = None
+        if capture:
+            next_caps = self._get_piece_captures(tr, tc, player)
+            if next_caps:
+                # Mismo jugador continúa; acotar a esa pieza
+                self.must_continue_from = (tr, tc)
+
+        # ¿Fin de juego?
+        human_pieces = np.sum(self.board < 0)
+        agent_pieces = np.sum(self.board > 0)
 
         if human_pieces == 0:
-            self.done = True
-            self.winner = 1
-            reward = 100 if self.current_player == 1 else -100
+            self.done, self.winner = True, 1
+            reward += (5.0 if player == 1 else -5.0)
         elif agent_pieces == 0:
-            self.done = True
-            self.winner = -1
-            reward = -100 if self.current_player == 1 else 100
-        elif len(self.get_valid_actions(-self.current_player)) == 0:
-            self.done = True
-            self.winner = self.current_player
-            reward = 100 if self.current_player == 1 else -100
+            self.done, self.winner = True, -1
+            reward += (-5.0 if player == 1 else 5.0)
+        elif self.no_capture_moves >= self.no_capture_draw:
+            self.done, self.winner = True, None  # tablas
+            # reward += 0.0
+        else:
+            # Bloqueo del oponente: si el oponente no puede mover, gana quien movió
+            opp = -player
+            if self.must_continue_from is None:
+                if len(self.get_valid_actions(opp)) == 0:
+                    self.done, self.winner = True, player
+                    reward += (5.0 if player == 1 else -5.0)
 
-        self.current_player *= -1
+        # Alternancia de turno (solo si no hay multi-captura)
+        if not self.done and self.must_continue_from is None:
+            self.current_player *= -1
+
         return self.get_state(), reward, self.done
